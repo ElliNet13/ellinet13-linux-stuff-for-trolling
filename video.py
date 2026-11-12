@@ -27,19 +27,6 @@ IS_EXITING = False
 
 
 # ==========================================
-# ERRORS
-# ==========================================
-
-def fail(stage: str, message: str) -> None:
-    print(
-        f"ElliNet13 Fullscreen Video Player - Error\n"
-        f"Stage: {stage}\n\n{message}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-
-
-# ==========================================
 # ARGUMENT PARSING
 # ==========================================
 
@@ -58,10 +45,23 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--no-escape",
         action="store_true",
-        help="Disable Escape as an exit key (use Ctrl+Alt+C instead)",
+        help="Disable Escape as an exit key",
     )
 
     return parser.parse_args()
+
+
+# ==========================================
+# ERRORS
+# ==========================================
+
+def fail(stage: str, message: str) -> None:
+    print(
+        f"ElliNet13 Fullscreen Video Player - Error\n"
+        f"Stage: {stage}\n\n{message}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 
 # ==========================================
@@ -90,13 +90,11 @@ def initialize_directories() -> None:
 
 
 # ==========================================
-# GENERATE CACHE KEY
+# CACHE HASH
 # ==========================================
 
 def get_url_hash(url: str) -> str:
-    return hashlib.sha256(
-        url.encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
 # ==========================================
@@ -148,26 +146,18 @@ def download_video(url: str, destination: Path) -> None:
 
 
 # ==========================================
-# GENERATE MPV INPUT CONFIG
+# MPV INPUT CONFIG
 # ==========================================
 
 def generate_mpv_config(no_escape: bool) -> None:
-    if no_escape:
-        config = """
-Ctrl+Alt+c quit
-Alt+F4 ignore
-"""
-    else:
-        config = """
-ESC quit
-Alt+F4 ignore
-"""
+    config = (
+        "Ctrl+Alt+c quit\nAlt+F4 ignore\n"
+        if no_escape
+        else "ESC quit\nAlt+F4 ignore\n"
+    )
 
     try:
-        MPV_INPUT_CONF.write_text(
-            config.strip() + "\n",
-            encoding="utf-8",
-        )
+        MPV_INPUT_CONF.write_text(config, encoding="utf-8")
     except OSError as error:
         fail("MPV configuration", str(error))
 
@@ -183,6 +173,10 @@ def cleanup() -> None:
         return
 
     IS_EXITING = True
+
+    # Prevent repeated Ctrl+C from interrupting cleanup.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     if MPV_PROCESS is None:
         return
@@ -212,6 +206,10 @@ def cleanup() -> None:
 
 def handle_signal(signum: int, frame: object) -> None:
     cleanup()
+
+    if signum == signal.SIGINT:
+        raise SystemExit(130)
+
     raise SystemExit(128 + signum)
 
 
@@ -252,13 +250,9 @@ def start_mpv(video_path: Path) -> None:
     except OSError as error:
         fail("MPV launch", str(error))
 
-    try:
-        MPV_PROCESS.wait()
-    except KeyboardInterrupt:
-        cleanup()
-        raise SystemExit(130)
-    finally:
-        MPV_PROCESS = None
+    # Wait without catching KeyboardInterrupt here.
+    # The central signal handler handles Ctrl+C.
+    MPV_PROCESS.wait()
 
 
 # ==========================================
