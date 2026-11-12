@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 
 import argparse
@@ -8,7 +7,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 # ==========================================
@@ -25,6 +23,7 @@ VIDEO_CACHE_DIR = BASE_DIR / "Videos"
 MPV_INPUT_CONF = BASE_DIR / "mpv-input.conf"
 
 MPV_PROCESS: subprocess.Popen | None = None
+IS_EXITING = False
 
 
 # ==========================================
@@ -37,7 +36,7 @@ def fail(stage: str, message: str) -> None:
         f"Stage: {stage}\n\n{message}",
         file=sys.stderr,
     )
-    sys.exit(1)
+    raise SystemExit(1)
 
 
 # ==========================================
@@ -75,7 +74,7 @@ def check_dependencies() -> None:
             fail(
                 "Dependency verification",
                 f"{dependency} is not installed.\n"
-                f"Install it using: sudo apt install mpv curl",
+                "Install using: sudo apt install mpv curl",
             )
 
 
@@ -95,7 +94,9 @@ def initialize_directories() -> None:
 # ==========================================
 
 def get_url_hash(url: str) -> str:
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        url.encode("utf-8")
+    ).hexdigest()
 
 
 # ==========================================
@@ -163,7 +164,10 @@ Alt+F4 ignore
 """
 
     try:
-        MPV_INPUT_CONF.write_text(config.strip() + "\n", encoding="utf-8")
+        MPV_INPUT_CONF.write_text(
+            config.strip() + "\n",
+            encoding="utf-8",
+        )
     except OSError as error:
         fail("MPV configuration", str(error))
 
@@ -173,17 +177,38 @@ Alt+F4 ignore
 # ==========================================
 
 def cleanup() -> None:
-    global MPV_PROCESS
+    global MPV_PROCESS, IS_EXITING
 
-    if MPV_PROCESS is not None and MPV_PROCESS.poll() is None:
-        MPV_PROCESS.terminate()
+    if IS_EXITING:
+        return
 
+    IS_EXITING = True
+
+    if MPV_PROCESS is None:
+        return
+
+    if MPV_PROCESS.poll() is None:
         try:
+            os.killpg(MPV_PROCESS.pid, signal.SIGTERM)
             MPV_PROCESS.wait(timeout=5)
+
         except subprocess.TimeoutExpired:
-            MPV_PROCESS.kill()
+            try:
+                os.killpg(MPV_PROCESS.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
             MPV_PROCESS.wait()
 
+        except ProcessLookupError:
+            pass
+
+    MPV_PROCESS = None
+
+
+# ==========================================
+# SIGNAL HANDLING
+# ==========================================
 
 def handle_signal(signum: int, frame: object) -> None:
     cleanup()
@@ -220,12 +245,18 @@ def start_mpv(video_path: Path) -> None:
     print("Starting fullscreen video player...")
 
     try:
-        MPV_PROCESS = subprocess.Popen(command)
+        MPV_PROCESS = subprocess.Popen(
+            command,
+            start_new_session=True,
+        )
     except OSError as error:
         fail("MPV launch", str(error))
 
     try:
         MPV_PROCESS.wait()
+    except KeyboardInterrupt:
+        cleanup()
+        raise SystemExit(130)
     finally:
         MPV_PROCESS = None
 
@@ -254,6 +285,10 @@ def main() -> None:
     finally:
         cleanup()
 
+
+# ==========================================
+# ENTRY POINT
+# ==========================================
 
 if __name__ == "__main__":
     main()
