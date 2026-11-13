@@ -1,288 +1,112 @@
 #!/usr/bin/env python3
-
 import argparse
 import hashlib
 import os
+import pathlib
 import shutil
-import signal
 import subprocess
 import sys
-from pathlib import Path
-
-# ==========================================
-# CONFIGURATION
-# ==========================================
+import tempfile
+import urllib.request
 
 DEFAULT_VIDEO_URL = "https://zipline.ellinet13.com/u/h800Hq.mp4"
 
-BASE_DIR = Path(
-    os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")
-) / "ElliNet13FullscreenVideoPlayer"
+def fail(stage, message):
+    print(f"[ERROR] Stage: {stage}\n{message}", file=sys.stderr)
+    sys.exit(1)
 
-VIDEO_CACHE_DIR = BASE_DIR / "Videos"
-MPV_INPUT_CONF = BASE_DIR / "mpv-input.conf"
+def get_url_hash(url):
+    return hashlib.sha256(url.encode('utf-8')).hexdigest()
 
-MPV_PROCESS: subprocess.Popen | None = None
-IS_EXITING = False
-
-
-# ==========================================
-# ARGUMENT PARSING
-# ==========================================
-
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="ElliNet13 Fullscreen Video Player"
-    )
-
-    parser.add_argument(
-        "url",
-        nargs="?",
-        default=DEFAULT_VIDEO_URL,
-        help="Video URL to play",
-    )
-
-    parser.add_argument(
-        "--no-escape",
-        action="store_true",
-        help="Disable Escape as an exit key",
-    )
-
-    return parser.parse_args()
-
-
-# ==========================================
-# ERRORS
-# ==========================================
-
-def fail(stage: str, message: str) -> None:
-    print(
-        f"ElliNet13 Fullscreen Video Player - Error\n"
-        f"Stage: {stage}\n\n{message}",
-        file=sys.stderr,
-    )
-    raise SystemExit(1)
-
-
-# ==========================================
-# DEPENDENCIES
-# ==========================================
-
-def check_dependencies() -> None:
-    for dependency in ("mpv", "curl"):
-        if shutil.which(dependency) is None:
-            fail(
-                "Dependency verification",
-                f"{dependency} is not installed.\n"
-                "Install using: sudo apt install mpv curl",
-            )
-
-
-# ==========================================
-# DIRECTORIES
-# ==========================================
-
-def initialize_directories() -> None:
+def download_file(url, dest_path):
     try:
-        VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        fail("Directory initialization", str(error))
+        print(f"Downloading video from: {url}")
+        urllib.request.urlretrieve(url, dest_path)
+    except Exception as e:
+        fail("Video download", str(e))
 
+def main():
+    parser = argparse.ArgumentParser(description="ElliNet13 Fullscreen Video Player for Linux")
+    parser.add_argument(
+        "url", 
+        nargs="?", 
+        default=DEFAULT_VIDEO_URL, 
+        help="URL of the video to play"
+    )
+    parser.add_argument(
+        "--no-escape", 
+        action="store_true", 
+        help="Disable exiting via the Escape key"
+    )
+    args = parser.parse_args()
 
-# ==========================================
-# CACHE HASH
-# ==========================================
-
-def get_url_hash(url: str) -> str:
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()
-
-
-# ==========================================
-# DOWNLOAD VIDEO
-# ==========================================
-
-def download_video(url: str, destination: Path) -> None:
-    if destination.exists() and destination.stat().st_size > 0:
-        print("Using cached video.")
-        return
-
-    print("Downloading video...")
-    print(url)
-
-    temporary_file = destination.with_suffix(".part")
-
-    try:
-        temporary_file.unlink(missing_ok=True)
-
-        result = subprocess.run(
-            [
-                "curl",
-                "--fail",
-                "--location",
-                "--show-error",
-                "--progress-bar",
-                "--retry",
-                "3",
-                "--output",
-                str(temporary_file),
-                url,
-            ],
-            check=False,
+    # 1. Verify MPV is installed
+    mpv_path = shutil.which("mpv")
+    if not mpv_path:
+        fail(
+            "MPV verification", 
+            "mpv is not installed or not found in PATH.\n"
+            "Install it via your package manager, e.g.:\n"
+            "  - Ubuntu/Debian: sudo apt install mpv\n"
+            "  - Fedora/RHEL:   sudo dnf install mpv\n"
+            "  - Arch Linux:    sudo pacman -S mpv"
         )
 
-        if result.returncode != 0:
-            fail("Video download", "Could not download video.")
+    # 2. Setup Cache Directories
+    base_dir = pathlib.Path.home() / ".cache" / "ElliNet13FullscreenVideoPlayer"
+    video_cache_dir = base_dir / "videos"
+    video_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        if not temporary_file.exists() or temporary_file.stat().st_size == 0:
-            fail("Video download", "Downloaded file is empty.")
+    # 3. Generate Caching Path via SHA-256 Hash
+    url_hash = get_url_hash(args.url)
+    video_path = video_cache_dir / f"{url_hash}.mp4"
 
-        temporary_file.replace(destination)
+    # 4. Download Video if Missing or Corrupted
+    if not video_path.exists() or video_path.stat().st_size < 1024:
+        if video_path.exists():
+            video_path.unlink()
+        download_file(args.url, video_path)
+        if not video_path.exists() or video_path.stat().st_size < 1024:
+            fail("Video validation", "Downloaded video file is invalid or too small.")
 
-    except OSError as error:
-        fail("Video download", str(error))
-
-    finally:
-        temporary_file.unlink(missing_ok=True)
-
-
-# ==========================================
-# MPV INPUT CONFIG
-# ==========================================
-
-def generate_mpv_config(no_escape: bool) -> None:
-    config = (
-        "Ctrl+Alt+c quit\nAlt+F4 ignore\n"
-        if no_escape
-        else "ESC quit\nAlt+F4 ignore\n"
-    )
-
-    try:
-        MPV_INPUT_CONF.write_text(config, encoding="utf-8")
-    except OSError as error:
-        fail("MPV configuration", str(error))
-
-
-# ==========================================
-# CLEANUP
-# ==========================================
-
-def cleanup() -> None:
-    global MPV_PROCESS, IS_EXITING
-
-    if IS_EXITING:
-        return
-
-    IS_EXITING = True
-
-    # Prevent repeated Ctrl+C from interrupting cleanup.
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-
-    if MPV_PROCESS is None:
-        return
-
-    if MPV_PROCESS.poll() is None:
-        try:
-            os.killpg(MPV_PROCESS.pid, signal.SIGTERM)
-            MPV_PROCESS.wait(timeout=5)
-
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(MPV_PROCESS.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-            MPV_PROCESS.wait()
-
-        except ProcessLookupError:
-            pass
-
-    MPV_PROCESS = None
-
-
-# ==========================================
-# SIGNAL HANDLING
-# ==========================================
-
-def handle_signal(signum: int, frame: object) -> None:
-    cleanup()
-
-    if signum == signal.SIGINT:
-        raise SystemExit(130)
-
-    raise SystemExit(128 + signum)
-
-
-# ==========================================
-# START MPV
-# ==========================================
-
-def start_mpv(video_path: Path) -> None:
-    global MPV_PROCESS
-
-    command = [
-        "mpv",
+    # 5. Build MPV Arguments
+    mpv_args = [
+        mpv_path,
         "--no-terminal",
         "--no-config",
-        "--force-window=yes",
-        "--fullscreen=yes",
-        "--ontop=yes",
+        "--fullscreen",
+        "--ontop",
         "--loop-file=no",
         "--keep-open=no",
         "--idle=no",
         "--no-osc",
-        "--no-osd-bar",
         "--no-border",
-        "--no-input-default-bindings",
-        "--input-vo-keyboard=yes",
-        f"--input-conf={MPV_INPUT_CONF}",
         "--title=ElliNet13FullscreenVideoPlayer",
-        str(video_path),
+        str(video_path)
     ]
 
-    print("Starting fullscreen video player...")
+    # Handle --no-escape by creating a temporary mpv input config that ignores ESC
+    temp_input_file = None
+    if args.no_escape:
+        fd, temp_input_path = tempfile.mkstemp(prefix="mpv_input_", suffix=".conf")
+        os.close(fd)
+        with open(temp_input_path, "w") as f:
+            f.write("ESC ignore\n")
+        temp_input_file = pathlib.Path(temp_input_path)
+        mpv_args.extend(["--input-conf", str(temp_input_file)])
 
+    # 6. Run MPV
     try:
-        MPV_PROCESS = subprocess.Popen(
-            command,
-            start_new_session=True,
-        )
-    except OSError as error:
-        fail("MPV launch", str(error))
-
-    # Wait without catching KeyboardInterrupt here.
-    # The central signal handler handles Ctrl+C.
-    MPV_PROCESS.wait()
-
-
-# ==========================================
-# MAIN
-# ==========================================
-
-def main() -> None:
-    args = parse_arguments()
-
-    check_dependencies()
-    initialize_directories()
-
-    url_hash = get_url_hash(args.url)
-    video_path = VIDEO_CACHE_DIR / f"{url_hash}.media"
-
-    download_video(args.url, video_path)
-    generate_mpv_config(args.no_escape)
-
-    signal.signal(signal.SIGINT, handle_signal)
-    signal.signal(signal.SIGTERM, handle_signal)
-
-    try:
-        start_mpv(video_path)
+        print("Launching player...")
+        subprocess.run(mpv_args, check=True)
+    except subprocess.CalledProcessError as e:
+        fail("MPV execution", f"mpv exited with error code {e.returncode}")
+    except KeyboardInterrupt:
+        print("\nExiting...")
     finally:
-        cleanup()
-
-
-# ==========================================
-# ENTRY POINT
-# ==========================================
+        # Cleanup temporary config if created
+        if temp_input_file and temp_input_file.exists():
+            temp_input_file.unlink()
 
 if __name__ == "__main__":
     main()
