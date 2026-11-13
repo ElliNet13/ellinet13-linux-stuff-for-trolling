@@ -18,10 +18,27 @@ def fail(stage, message):
 def get_url_hash(url):
     return hashlib.sha256(url.encode('utf-8')).hexdigest()
 
+def get_curl_user_agent():
+    try:
+        result = subprocess.run(["curl", "--version"], capture_output=True, text=True, check=True)
+        first_line = result.stdout.splitlines()[0]
+        parts = first_line.split()
+        if len(parts) >= 2:
+            return f"curl/{parts[1]}"
+    except Exception:
+        pass
+    return "curl/8.0.0"
+
 def download_file(url, dest_path):
     try:
         print(f"Downloading video from: {url}")
-        urllib.request.urlretrieve(url, dest_path)
+        user_agent = get_curl_user_agent()
+        headers = {'User-Agent': user_agent}
+        print(f"Using User-Agent: {user_agent}")
+        
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response, open(dest_path, 'wb') as out_file:
+            shutil.copyfileobj(response, out_file)
     except Exception as e:
         fail("Video download", str(e))
 
@@ -46,7 +63,7 @@ def main():
         fail(
             "MPV verification", 
             "mpv is not installed or not found in PATH.\n"
-            "Install it via your package manager, e.g.:\n"
+            "Install it via your package manager, e.g:\n"
             "  - Ubuntu/Debian: sudo apt install mpv\n"
             "  - Fedora/RHEL:   sudo dnf install mpv\n"
             "  - Arch Linux:    sudo pacman -S mpv"
@@ -104,7 +121,6 @@ def main():
     except KeyboardInterrupt:
         print("\nExiting...")
     finally:
-        # Cleanup temporary config if created
         if temp_input_file and temp_input_file.exists():
             temp_input_file.unlink()
 
